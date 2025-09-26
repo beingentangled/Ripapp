@@ -11,7 +11,10 @@
   "dependencies": {
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "next": "15.5.4"
+    "next": "15.5.4",
+    "@reown/appkit": "^1.8.4",
+    "@reown/appkit-adapter-ethers": "^1.8.4",
+    "@reown/appkit-adapter-wagmi": "^1.8.4"
   },
   "devDependencies": {
     "typescript": "^5",
