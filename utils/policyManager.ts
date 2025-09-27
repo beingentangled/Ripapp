@@ -43,6 +43,7 @@ export interface CommitmentData {
     tier: number;
     premium: string;
     invoicePrice: string;
+    invoiceDate: string;
     details: any;
     salt: string;
     productHash: string;
@@ -104,9 +105,32 @@ export function generatePolicyData(
     }
 ): PolicyData {
     const now = new Date();
-    const invoiceDate = invoiceData.purchaseDate
-        ? new Date(invoiceData.purchaseDate).getTime() / 1000
-        : Math.floor(now.getTime() / 1000);
+    let invoiceDateSeconds: number | null = null;
+
+    const commitmentInvoiceDate = commitmentData.invoiceDate
+        ?? commitmentData.details?.invoiceDate
+        ?? null;
+
+    if (commitmentInvoiceDate !== null && commitmentInvoiceDate !== undefined) {
+        const parsed = Number(commitmentInvoiceDate);
+        if (!Number.isNaN(parsed) && Number.isFinite(parsed)) {
+            invoiceDateSeconds = Math.floor(parsed);
+        }
+    }
+
+    if (invoiceDateSeconds === null) {
+        if (invoiceData.purchaseDate) {
+            const parsedDate = new Date(invoiceData.purchaseDate);
+            const seconds = Math.floor(parsedDate.getTime() / 1000);
+            if (!Number.isNaN(seconds)) {
+                invoiceDateSeconds = seconds;
+            }
+        }
+    }
+
+    if (invoiceDateSeconds === null) {
+        invoiceDateSeconds = Math.floor(now.getTime() / 1000);
+    }
 
     return {
         policyId,
@@ -116,7 +140,7 @@ export function generatePolicyData(
         purchaseDetails: {
             orderHash: commitmentData.orderHash,
             invoicePrice: commitmentData.invoicePrice,
-            invoiceDate,
+            invoiceDate: invoiceDateSeconds,
             productHash: commitmentData.productHash,
             salt: commitmentData.salt,
             selectedTier: commitmentData.tier,

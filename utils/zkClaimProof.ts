@@ -37,22 +37,47 @@ function formatProof(fullProof: any): GeneratedClaimProof {
     };
 }
 
+function toFieldString(value: string | number | bigint): string {
+    if (typeof value === 'bigint') {
+        return value.toString();
+    }
+
+    if (typeof value === 'number') {
+        return BigInt(value).toString();
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return '0';
+    }
+
+    if (trimmed.startsWith('0x') || trimmed.startsWith('0X')) {
+        try {
+            return BigInt(trimmed).toString();
+        } catch {
+            // Fall through and return the original string if it is not valid hex
+        }
+    }
+
+    return trimmed;
+}
+
 function buildCircuitInputs(policy: PolicyData, proof: OracleMerkleProof, merkleRoot: string) {
     return {
-        orderHash: policy.purchaseDetails.orderHash,
-        invoicePrice: policy.purchaseDetails.invoicePrice,
-        invoiceDate: policy.purchaseDetails.invoiceDate,
-        productHash: policy.purchaseDetails.productHash,
-        salt: policy.purchaseDetails.salt,
-        selectedTier: policy.purchaseDetails.selectedTier,
-        currentPrice: proof.currentPrice.toString(),
-        leafHash: proof.leafBigInt || proof.leaf,
-        merkleProof: proof.siblings,
-        leafIndex: proof.pathIndices,
-        commitment: policy.secretCommitment,
-        merkleRoot: merkleRoot,
-        policyStartDate: policy.policyPurchaseDate,
-        paidPremium: policy.premium
+        orderHash: toFieldString(policy.purchaseDetails.orderHash),
+        invoicePrice: toFieldString(policy.purchaseDetails.invoicePrice),
+        invoiceDate: toFieldString(policy.purchaseDetails.invoiceDate),
+        productHash: toFieldString(policy.purchaseDetails.productHash),
+        salt: toFieldString(policy.purchaseDetails.salt),
+        selectedTier: toFieldString(policy.purchaseDetails.selectedTier),
+        currentPrice: toFieldString(proof.currentPrice),
+        leafHash: toFieldString(proof.leafBigInt || proof.leaf),
+        merkleProof: proof.siblings.map(toFieldString),
+        leafIndex: proof.pathIndices.map(index => Number(index)),
+        commitment: toFieldString(policy.secretCommitment),
+        merkleRoot: toFieldString(merkleRoot),
+        policyStartDate: toFieldString(policy.policyPurchaseDate),
+        paidPremium: toFieldString(policy.premium)
     };
 }
 

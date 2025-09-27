@@ -664,6 +664,7 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 tier,
                 premium: premium.toString(),
                 invoicePrice: details.invoicePrice.toString(),
+                invoiceDate: details.invoiceDate.toString(),
                 details: serializableDetails,
                 salt: `0x${details.salt.toString(16)}`,
                 productHash: `0x${details.productHash.toString(16)}`,
