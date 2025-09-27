@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { ethers } from 'ethers';
 import styles from '../../styles/InvoiceWidget.module.css';
 import { storageService, OrderInfo, OrderItem, SessionDataResult } from '../../utils/storage';
@@ -8,7 +8,9 @@ import {
     generatePolicyData,
     savePolicyForAddress,
     saveCommitmentForAddress,
-    CommitmentData
+    CommitmentData,
+    getPoliciesForAddress,
+    PolicyData
 } from '../../utils/policyManager';
 import { useWallet } from '../../context/WalletContext';
 import InvoiceHeader from './invoice/InvoiceHeader';
@@ -40,6 +42,111 @@ const coerceQuantity = (...values: Array<unknown>): string | null => {
         }
     }
     return null;
+};
+
+const parsePriceToNumber = (value?: string | null): number | null => {
+    if (!value) {
+        return null;
+    }
+    const sanitized = value.replace(/[^0-9.,]/g, '').replace(/,/g, '');
+    if (!sanitized) {
+        return null;
+    }
+    const parsed = Number.parseFloat(sanitized);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+const normalizeProductId = (value?: string | null): string | null => {
+    if (!value) {
+        return null;
+    }
+    const uppercase = value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return uppercase || null;
+};
+
+const buildProductPayloads = (info: OrderInfo | null): Array<{ id: string; name: string; basePrice: number }> => {
+    if (!info) {
+        return [];
+    }
+
+    const candidates = info.orderItems && info.orderItems.length > 0
+        ? info.orderItems
+        : [
+            {
+                asin: info.asin,
+                name: info.productName,
+                price: info.orderTotal
+            }
+        ];
+
+    const payloads: Array<{ id: string; name: string; basePrice: number }> = [];
+    const seenIds = new Set<string>();
+
+    for (const candidate of candidates) {
+        const rawId = candidate?.asin || candidate?.name || info.asin || info.productName || info.orderId;
+        const normalizedId = normalizeProductId(rawId ?? undefined);
+        if (!normalizedId || seenIds.has(normalizedId)) {
+            continue;
+        }
+
+        const priceCandidate = candidate?.price || info.orderTotal || info.invoiceDetails?.unitPrice;
+        const numericPrice = parsePriceToNumber(priceCandidate || null);
+        if (numericPrice === null || numericPrice <= 0) {
+            continue;
+        }
+
+        const name = candidate?.name || info.productName || normalizedId;
+        const basePrice = Math.round(numericPrice * 1_000_000);
+
+        payloads.push({ id: normalizedId, name, basePrice });
+        seenIds.add(normalizedId);
+    }
+
+    return payloads;
+};
+
+const toNumber = (value: number | string | null | undefined): number | undefined => {
+    if (value === null || value === undefined) {
+        return undefined;
+    }
+    const numeric = typeof value === 'string' ? Number(value) : value;
+    return Number.isFinite(numeric) ? numeric : undefined;
+};
+
+const formatTimestamp = (seconds?: number | null): string => {
+    if (!seconds) {
+        return 'Unknown';
+    }
+    const date = new Date(seconds * 1000);
+    if (Number.isNaN(date.getTime())) {
+        return 'Unknown';
+    }
+    return date.toLocaleString();
+};
+
+const formatUsdcValue = (value?: string | null): string => {
+    if (!value) {
+        return 'N/A';
+    }
+    try {
+        return `${ethers.formatUnits(value, 6)} USDC`;
+    } catch (error) {
+        try {
+            return `${ethers.formatUnits(BigInt(value), 6)} USDC`;
+        } catch {
+            return value;
+        }
+    }
+};
+
+const shortenValue = (value?: string | null, leading = 6, trailing = 4): string => {
+    if (!value) {
+        return 'N/A';
+    }
+    if (value.length <= leading + trailing + 3) {
+        return value;
+    }
+    return `${value.slice(0, leading)}…${value.slice(-trailing)}`;
 };
 
 const mapSessionDataToOrderInfo = (sessionData: SessionDataResult): OrderInfo => {
@@ -132,6 +239,44 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
     const [zkError, setZkError] = useState<string | null>(null);
     const [zkCommitmentData, setZkCommitmentData] = useState<ZkCommitmentDisplayData | null>(null);
     const [selectedZkItem, setSelectedZkItem] = useState<OrderItem | null>(null);
+    const [policies, setPolicies] = useState<PolicyData[]>([]);
+    const syncedProductsRef = useRef<Set<string>>(new Set());
+
+    const syncProductCatalog = useCallback(async (info: OrderInfo | null) => {
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        const payloads = buildProductPayloads(info);
+        if (!payloads.length) {
+            return;
+        }
+
+        await Promise.all(payloads.map(async (payload) => {
+            if (syncedProductsRef.current.has(payload.id)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/products', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    syncedProductsRef.current.add(payload.id);
+                } else {
+                    const message = await response.text();
+                    console.error('Failed to sync product catalog:', message);
+                }
+            } catch (error) {
+                console.error('Error syncing product catalog:', error);
+            }
+        }));
+    }, []);
 
     const applySessionData = useCallback((sessionData: SessionDataResult) => {
         const mappedOrderInfo = mapSessionDataToOrderInfo(sessionData);
@@ -140,7 +285,8 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
         onProcessingStateChange?.('extracted');
         onOrderExtracted?.(mappedOrderInfo);
         console.log('RIP: Order data successfully loaded with', sessionData.orderItems.length, 'items');
-    }, [onOrderExtracted, onProcessingStateChange]);
+        syncProductCatalog(mappedOrderInfo);
+    }, [onOrderExtracted, onProcessingStateChange, syncProductCatalog]);
 
     const loadOrderData = useCallback(async () => {
         try {
@@ -199,6 +345,22 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             window.removeEventListener('message', handleExtensionMessage);
         };
     }, [applySessionData, loadOrderData]);
+
+    useEffect(() => {
+        if (!mounted) {
+            return;
+        }
+
+        syncedProductsRef.current.clear();
+
+        if (!address) {
+            setPolicies([]);
+            return;
+        }
+
+        const storedPolicies = getPoliciesForAddress(address);
+        setPolicies(storedPolicies);
+    }, [address, mounted]);
 
     const retryLoad = async () => {
         setIsRetrying(true);
@@ -282,7 +444,13 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             const tokenContract = paymentToken as any;
             const vaultContract = insuranceVault as any;
 
-            const currentAllowance = await tokenContract.allowance(signerAddress, vaultAddress);
+            let currentAllowance: bigint;
+            try {
+                currentAllowance = await tokenContract.allowance(signerAddress, vaultAddress);
+            } catch (allowanceError) {
+                console.warn('ripextension: Failed to fetch current allowance, defaulting to 0.', allowanceError);
+                currentAllowance = BigInt(0);
+            }
 
             if (currentAllowance < premium) {
                 console.log('Approving token spend...');
@@ -365,6 +533,8 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             savePolicyForAddress(userAddress, policyData);
             saveCommitmentForAddress(userAddress, commitmentData);
 
+            setPolicies(getPoliciesForAddress(userAddress));
+
             console.log('Policy and commitment data saved to localStorage');
 
             setZkStep('success');
@@ -398,6 +568,11 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
         setZkStep('idle');
         setSelectedZkItem(null);
     };
+
+    const handleCheckClaim = useCallback((policy: PolicyData) => {
+        console.log('Checking claim eligibility for policy:', policy.policyId, policy);
+        alert(`Claim verification is not implemented yet. Policy ID: ${policy.policyId}`);
+    }, []);
 
     const statusText = useMemo(
         () => resolveProcessingStatusText(processingState, mounted, orderInfo),
@@ -438,6 +613,146 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                     zkState={zkState}
                     onClearZkError={handleClearZkError}
                 />
+            )}
+
+            {address && (
+                <div className={styles.policySection}>
+                    <h3 className={styles.policyHeader}>Saved Policies</h3>
+                    {policies.length === 0 ? (
+                        <p className={styles.policyEmpty}>No saved policies found for this wallet yet.</p>
+                    ) : (
+                        <div className={styles.policyCards}>
+                            {policies.map(policy => (
+                                <div className={styles.policyCard} key={policy.transactionHash}>
+                                    <div className={styles.policyCardHeader}>
+                                        <div className={styles.policyMeta}>
+                                            <span className={styles.policyId}>Policy #{policy.policyId}</span>
+                                            <span className={styles.policyDate}>Purchased {formatTimestamp(toNumber(policy.policyPurchaseDate))}</span>
+                                            <span className={styles.policyNetwork}>Network: {policy.network || 'Unknown'}</span>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className={styles.policyClaimButton}
+                                            onClick={() => handleCheckClaim(policy)}
+                                        >
+                                            Check For Claim
+                                        </button>
+                                    </div>
+
+                                    <div className={styles.policyDetailSection}>
+                                        <h4 className={styles.policySectionTitle}>Coverage Summary</h4>
+                                        <div className={styles.policyDetailGrid}>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Premium</span>
+                                                <span className={styles.policyDetailValue}>{formatUsdcValue(policy.premium)}</span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Invoice Price</span>
+                                                <span className={styles.policyDetailValue}>{formatUsdcValue(policy.purchaseDetails.invoicePrice)}</span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Tier</span>
+                                                <span className={styles.policyDetailValue}>Tier {policy.tier}</span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Invoice Date</span>
+                                                <span className={styles.policyDetailValue}>{formatTimestamp(toNumber(policy.purchaseDetails.invoiceDate))}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className={styles.policyDetailSection}>
+                                        <h4 className={styles.policySectionTitle}>Identifiers</h4>
+                                        <div className={styles.policyDetailGrid}>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Product ID</span>
+                                                <span className={styles.policyDetailValue}>{policy.purchaseDetails.productId || 'Unknown'}</span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Transaction Hash</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.transactionHash}
+                                                >
+                                                    {shortenValue(policy.transactionHash, 10, 8)}
+                                                </span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Order Hash</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.purchaseDetails.orderHash}
+                                                >
+                                                    {shortenValue(policy.purchaseDetails.orderHash, 10, 8)}
+                                                </span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Product Hash</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.purchaseDetails.productHash}
+                                                >
+                                                    {shortenValue(policy.purchaseDetails.productHash, 10, 8)}
+                                                </span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Salt</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.purchaseDetails.salt}
+                                                >
+                                                    {shortenValue(policy.purchaseDetails.salt, 10, 8)}
+                                                </span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Secret Commitment</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.secretCommitment}
+                                                >
+                                                    {shortenValue(policy.secretCommitment, 10, 8)}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className={styles.policyDetailSection}>
+                                        <h4 className={styles.policySectionTitle}>Contract References</h4>
+                                        <div className={styles.policyDetailGrid}>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Vault</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.contracts.vault}
+                                                >
+                                                    {shortenValue(policy.contracts.vault, 10, 8)}
+                                                </span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Payment Token</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.contracts.token}
+                                                >
+                                                    {shortenValue(policy.contracts.token, 10, 8)}
+                                                </span>
+                                            </div>
+                                            <div className={styles.policyDetail}>
+                                                <span className={styles.policyDetailLabel}>Verifier</span>
+                                                <span
+                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
+                                                    title={policy.contracts.verifier}
+                                                >
+                                                    {shortenValue(policy.contracts.verifier, 10, 8)}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
             )}
 
             {processingState === 'extracted' && orderInfo && (!orderInfo.orderItems || orderInfo.orderItems.length === 0) && (
