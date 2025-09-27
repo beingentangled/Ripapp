@@ -45,7 +45,7 @@ const ProcessingStatus: React.FC<ProcessingStatusProps> = ({
                 </p>
                 <ul style={{ margin: '0.5rem 0 0 1rem', color: '#856404', fontSize: '0.85rem' }}>
                     <li>The RIP (Remorse Insurance Protocol) extension is installed and enabled</li>
-                    <li>You've visited an Amazon order page recently</li>
+                    <li>You&apos;ve visited an Amazon order page recently</li>
                     <li>Try refreshing this page</li>
                 </ul>
             </div>

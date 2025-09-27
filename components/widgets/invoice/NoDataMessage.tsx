@@ -10,7 +10,9 @@ const NoDataMessage: React.FC = () => (
         <ol style={{ textAlign: 'left', maxWidth: '400px', margin: '0 auto', lineHeight: '1.6' }}>
             <li>Install the RIP (Remorse Insurance Protocol) browser extension</li>
             <li>Go to your Amazon order history page</li>
-            <li>Click the "Insure by Crypto" button on any order</li>
+            <li>
+                Click the <span>&quot;Insure by Crypto&quot;</span> button on any order
+            </li>
             <li>Your order data will be loaded here automatically</li>
         </ol>
     </div>

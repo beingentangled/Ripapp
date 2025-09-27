@@ -32,7 +32,15 @@ const anvilLocal: AppKitNetwork = {
 }
 
 // 2. Setting the networks - Include mainnet networks and Anvil Local
-const networks = [mainnet, arbitrum, polygon, base, optimism, sepolia, anvilLocal]
+const supportedNetworks: [AppKitNetwork, ...AppKitNetwork[]] = [
+    mainnet,
+    arbitrum,
+    polygon,
+    base,
+    optimism,
+    sepolia,
+    anvilLocal
+]
 
 // 3. Create a metadata object - optional
 const metadata = {
@@ -48,7 +56,7 @@ const ethersAdapter = new EthersAdapter()
 // 5. Create a AppKit instance
 export const appKit = createAppKit({
     adapters: [ethersAdapter],
-    networks: [mainnet, arbitrum, polygon, base, optimism, sepolia, anvilLocal] as [AppKitNetwork, ...AppKitNetwork[]],
+    networks: supportedNetworks,
     metadata,
     projectId,
     features: {

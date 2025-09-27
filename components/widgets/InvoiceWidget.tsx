@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { ethers } from 'ethers';
+import type { BaseContract, ContractTransactionResponse, ContractTransactionReceipt, Log } from 'ethers';
 import styles from '../../styles/InvoiceWidget.module.css';
 import { storageService, OrderInfo, OrderItem, SessionDataResult } from '../../utils/storage';
 import { buildCommitment, InvoiceData, PurchaseDetails } from '../../lib/zk/commitment';
@@ -10,7 +11,8 @@ import {
     saveCommitmentForAddress,
     CommitmentData,
     getPoliciesForAddress,
-    PolicyData
+    PolicyData,
+    mergePolicyForAddress
 } from '../../utils/policyManager';
 import { useWallet } from '../../context/WalletContext';
 import InvoiceHeader from './invoice/InvoiceHeader';
@@ -19,8 +21,69 @@ import OrderItemsList from './invoice/OrderItemsList';
 import NoItemsMessage from './invoice/NoItemsMessage';
 import NoDataMessage from './invoice/NoDataMessage';
 import { ProcessingState, ZkCommitmentDisplayData, ZkPurchaseState, ZkStep } from './invoice/types';
+import { checkEligibility, formatUsdFromMicros } from '../../utils/oracleClient';
+import type { OracleMerkleProof } from '../../utils/oracleClient';
+import { generateClaimProof, formatMerkleRoot, formatPublicSignals } from '../../utils/zkClaimProof';
 
-type ExtendedOrderItem = OrderItem & Record<string, any>;
+type ExtendedOrderItem = OrderItem & {
+    orderId?: string;
+    shipmentId?: string;
+    trackingId?: string;
+    productName?: string;
+    orderTotal?: string;
+    quantity?: string | number;
+    priceUsdValue?: number;
+    invoiceDetails?: {
+        unitPrice?: string | number;
+    } | null;
+    [key: string]: unknown;
+};
+
+interface ExtendedOrderInfo {
+    orderId?: string | null;
+    shipmentId?: string | null;
+    trackingId?: string | null;
+    productName?: string | null;
+    orderTotal?: string | null;
+    orderDate?: string | null;
+    orderStatus?: string | null;
+    seller?: string | null;
+    asin?: string | null;
+    quantity?: string | number | null;
+    invoiceUrl?: string | null;
+    invoiceDetails?: {
+        unitPrice?: string | number;
+    } | null;
+    currentAsin?: string | null;
+}
+
+type PaymentTokenContract = BaseContract & {
+    allowance(owner: string, spender: string): Promise<bigint>;
+    approve(spender: string, value: bigint): Promise<ContractTransactionResponse>;
+};
+
+type InsuranceVaultContract = BaseContract & {
+    buyPolicy(commitment: string, premium: bigint): Promise<ContractTransactionResponse>;
+    claimPayout(
+        policyId: bigint,
+        commitment: string,
+        merkleRoot: string,
+        policyPurchaseDate: bigint,
+        premiumPaid: bigint,
+        proofA: [string, string],
+        proofB: [[string, string], [string, string]],
+        proofC: [string, string],
+        publicSignals: bigint[]
+    ): Promise<ContractTransactionResponse>;
+    priceMerkleRoot(): Promise<string>;
+    policies(policyId: bigint): Promise<{
+        buyer: string;
+        commitment: string;
+        premiumPaid: bigint;
+        purchaseDate: bigint;
+        alreadyClaimed: boolean;
+    }>;
+};
 
 const coerceString = (...values: Array<unknown>): string | null => {
     for (const value of values) {
@@ -130,7 +193,7 @@ const formatUsdcValue = (value?: string | null): string => {
     }
     try {
         return `${ethers.formatUnits(value, 6)} USDC`;
-    } catch (error) {
+    } catch {
         try {
             return `${ethers.formatUnits(BigInt(value), 6)} USDC`;
         } catch {
@@ -150,7 +213,7 @@ const shortenValue = (value?: string | null, leading = 6, trailing = 4): string 
 };
 
 const mapSessionDataToOrderInfo = (sessionData: SessionDataResult): OrderInfo => {
-    const normalizedInfo = (sessionData.orderInfo ?? {}) as Record<string, any>;
+    const normalizedInfo = (sessionData.orderInfo ?? {}) as Partial<ExtendedOrderInfo>;
     const firstItem = sessionData.orderItems[0] as ExtendedOrderItem | undefined;
 
     return {
@@ -169,6 +232,27 @@ const mapSessionDataToOrderInfo = (sessionData: SessionDataResult): OrderInfo =>
         invoiceDetails: normalizedInfo.invoiceDetails ?? firstItem?.invoiceDetails ?? null,
     };
 };
+
+interface ClaimEligibilityState {
+    dropPercentage: number;
+    dropAmountMicros: string;
+    currentPriceMicros: string;
+    formattedDrop: string;
+    formattedCurrent: string;
+    merkleRoot: string;
+    proof: OracleMerkleProof;
+    payoutAmount: string;
+    checkedAt: number;
+}
+
+type ClaimStatus = 'idle' | 'active' | 'checking' | 'eligible' | 'ineligible' | 'claiming' | 'claimed' | 'error';
+
+interface ClaimState {
+    status: ClaimStatus;
+    eligibility?: ClaimEligibilityState;
+    error?: string;
+    txHash?: string;
+}
 
 interface InvoiceWidgetProps {
     onOrderExtracted?: (orderInfo: OrderInfo) => void;
@@ -241,6 +325,23 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
     const [selectedZkItem, setSelectedZkItem] = useState<OrderItem | null>(null);
     const [policies, setPolicies] = useState<PolicyData[]>([]);
     const syncedProductsRef = useRef<Set<string>>(new Set());
+    const [claimStates, setClaimStates] = useState<Record<string, ClaimState>>({});
+
+    const updateClaimState = useCallback((policyId: string, partial: Partial<ClaimState>) => {
+        setClaimStates(prev => {
+            const existing = prev[policyId];
+            const nextStatus = partial.status ?? existing?.status ?? 'active';
+
+            return {
+                ...prev,
+                [policyId]: {
+                    ...existing,
+                    ...partial,
+                    status: nextStatus
+                }
+            };
+        });
+    }, []);
 
     const syncProductCatalog = useCallback(async (info: OrderInfo | null) => {
         if (typeof window === 'undefined') {
@@ -355,11 +456,43 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
 
         if (!address) {
             setPolicies([]);
+            setClaimStates({});
             return;
         }
 
         const storedPolicies = getPoliciesForAddress(address);
         setPolicies(storedPolicies);
+
+        setClaimStates(prev => {
+            const next: Record<string, ClaimState> = {};
+
+            storedPolicies.forEach(policy => {
+                const previous = prev[policy.policyId];
+                const status = policy.status || previous?.status || 'active';
+                const eligibility = policy.eligibility
+                    ? {
+                        dropPercentage: policy.eligibility.dropPercentage,
+                        dropAmountMicros: policy.eligibility.dropAmount,
+                        currentPriceMicros: policy.eligibility.currentPrice,
+                        formattedDrop: formatUsdFromMicros(policy.eligibility.dropAmount),
+                        formattedCurrent: formatUsdFromMicros(policy.eligibility.currentPrice),
+                        merkleRoot: policy.eligibility.merkleRoot || previous?.eligibility?.merkleRoot || '',
+                        proof: policy.eligibility.proof || previous?.eligibility?.proof,
+                        payoutAmount: policy.eligibility.payoutAmount || previous?.eligibility?.payoutAmount || '0',
+                        checkedAt: policy.eligibility.checkedAt
+                    }
+                    : previous?.eligibility;
+
+                next[policy.policyId] = {
+                    status: status as ClaimStatus,
+                    txHash: policy.claimTxHash || previous?.txHash,
+                    eligibility,
+                    error: previous?.error
+                };
+            });
+
+            return next;
+        });
     }, [address, mounted]);
 
     const retryLoad = async () => {
@@ -381,13 +514,34 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             setZkError(null);
             setSelectedZkItem(item);
 
-            const usdPrice = typeof (item as any).priceUsdValue === 'number'
-                ? Number((item as any).priceUsdValue)
-                : parseFloat((item.price || '').replace(/[^0-9.]/g, '')) || 0;
+            const extendedItem = item as ExtendedOrderItem;
+            const invoiceUnitPrice = extendedItem.invoiceDetails?.unitPrice;
+            const invoiceUnitPriceString = typeof invoiceUnitPrice === 'number'
+                ? invoiceUnitPrice.toString()
+                : invoiceUnitPrice ?? null;
+
+            const parsedPrice = typeof extendedItem.priceUsdValue === 'number'
+                ? extendedItem.priceUsdValue
+                : parsePriceToNumber(extendedItem.price ?? null)
+                    ?? parsePriceToNumber(extendedItem.orderTotal ?? null)
+                    ?? parsePriceToNumber(invoiceUnitPriceString)
+                    ?? parsePriceToNumber(orderInfo?.orderTotal ?? null)
+                    ?? 0;
+
+            const usdPrice = parsedPrice;
+
+            const productIdSource = extendedItem.asin
+                || (typeof extendedItem.productName === 'string' ? extendedItem.productName : undefined)
+                || (typeof orderInfo?.asin === 'string' ? orderInfo.asin : undefined)
+                || (typeof orderInfo?.productName === 'string' ? orderInfo.productName : undefined)
+                || (item.name ?? undefined)
+                || 'unknown';
+
+            const normalizedProductId = normalizeProductId(productIdSource) || 'UNKNOWN';
 
             const invoiceData: InvoiceData = {
                 orderNumber: item.orderId || `ORDER_${Date.now()}`,
-                productId: item.asin || `PRODUCT_${Date.now()}`,
+                productId: normalizedProductId,
                 purchasePriceUsd: usdPrice,
                 purchaseDate: item.orderDate ?
                     new Date(item.orderDate).toISOString().split('T')[0] :
@@ -438,15 +592,15 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 throw new Error('Please connect your wallet first');
             }
 
-            const insuranceVault = await getInsuranceVaultContractWithSigner(signer);
+            const insuranceVault = await getInsuranceVaultContractWithSigner(signer) as InsuranceVaultContract;
             const paymentToken = await getPaymentTokenContract(process.env.NEXT_PUBLIC_PAYMENT_TOKEN, signer);
 
             setZkStep('approving');
             const signerAddress = address;
             const vaultAddress = await insuranceVault.getAddress();
 
-            const tokenContract = paymentToken as any;
-            const vaultContract = insuranceVault as any;
+            const tokenContract = paymentToken as PaymentTokenContract;
+            const vaultContract = insuranceVault as InsuranceVaultContract;
 
             let currentAllowance: bigint;
             try {
@@ -470,9 +624,14 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             const tx = await vaultContract.buyPolicy(commitment, premium);
 
             console.log('Policy purchase transaction sent:', tx.hash);
-            const receipt = await tx.wait();
+            const receiptNullable = await tx.wait();
+            if (!receiptNullable) {
+                throw new Error('Transaction receipt was not received.');
+            }
 
-            const policyBoughtEvent = receipt.logs.find((log: any) => {
+            const receipt = receiptNullable as ContractTransactionReceipt;
+
+            const policyBoughtEvent = receipt.logs.find((log: Log) => {
                 try {
                     const parsed = insuranceVault.interface.parseLog(log);
                     return parsed?.name === 'PolicyBought';
@@ -495,8 +654,8 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 orderHash: details.orderHash,
                 invoicePrice: details.invoicePrice.toString(),
                 invoiceDate: details.invoiceDate,
-                productHash: '0x' + (details.productHash as bigint).toString(16),
-                salt: '0x' + (details.salt as bigint).toString(16),
+                productHash: `0x${details.productHash.toString(16)}`,
+                salt: `0x${details.salt.toString(16)}`,
                 selectedTier: details.selectedTier
             };
 
@@ -506,8 +665,8 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 premium: premium.toString(),
                 invoicePrice: details.invoicePrice.toString(),
                 details: serializableDetails,
-                salt: '0x' + (details.salt as bigint).toString(16),
-                productHash: '0x' + (details.productHash as bigint).toString(16),
+                salt: `0x${details.salt.toString(16)}`,
+                productHash: `0x${details.productHash.toString(16)}`,
                 orderHash: details.orderHash
             };
 
@@ -521,7 +680,7 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
 
             const invoiceDataForPolicy = {
                 ...item,
-                productId: item.asin || item.name || 'unknown',
+                productId: normalizedProductId,
                 purchaseDate: item.orderDate || new Date().toISOString()
             };
 
@@ -538,6 +697,12 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             saveCommitmentForAddress(userAddress, commitmentData);
 
             setPolicies(getPoliciesForAddress(userAddress));
+            setClaimStates(prev => ({
+                ...prev,
+                [policyId]: {
+                    status: 'active'
+                }
+            }));
 
             console.log('Policy and commitment data saved to localStorage');
 
@@ -553,9 +718,10 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 setSelectedZkItem(null);
                 setZkCommitmentData(null);
             }, 3000);
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error('ZK Policy purchase failed:', error);
-            setZkError(error.message || 'Unknown error occurred');
+            const message = error instanceof Error ? error.message : 'Unknown error occurred';
+            setZkError(message);
             setZkStep('idle');
         } finally {
             setZkProcessing(false);
@@ -573,10 +739,175 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
         setSelectedZkItem(null);
     };
 
-    const handleCheckClaim = useCallback((policy: PolicyData) => {
-        console.log('Checking claim eligibility for policy:', policy.policyId, policy);
-        alert(`Claim verification is not implemented yet. Policy ID: ${policy.policyId}`);
-    }, []);
+    const handleCheckClaim = useCallback(async (policy: PolicyData) => {
+        if (!address) {
+            alert('Please connect your wallet to check claims.');
+            return;
+        }
+
+        if (!policy.purchaseDetails.productId || policy.purchaseDetails.productId === 'unknown') {
+            alert('Unable to determine product ID for this policy.');
+            return;
+        }
+
+        if (!/^[0-9]+$/.test(policy.policyId)) {
+            alert('Policy ID is invalid.');
+            return;
+        }
+
+        updateClaimState(policy.policyId, { status: 'checking', error: undefined });
+
+        try {
+            const originalPrice = BigInt(policy.purchaseDetails.invoicePrice);
+            if (originalPrice <= BigInt(0)) {
+                throw new Error('Invalid purchase price recorded for policy.');
+            }
+
+            const normalizedPolicyProductId = normalizeProductId(policy.purchaseDetails.productId) || policy.purchaseDetails.productId;
+            const eligibility = await checkEligibility(normalizedPolicyProductId, originalPrice);
+
+            updateClaimState(policy.policyId, {
+                status: eligibility.eligible ? 'eligible' : 'ineligible',
+                eligibility: {
+                    dropPercentage: eligibility.dropPercentage,
+                    dropAmountMicros: eligibility.dropAmount,
+                    currentPriceMicros: eligibility.currentPrice,
+                    formattedDrop: formatUsdFromMicros(eligibility.dropAmount),
+                    formattedCurrent: formatUsdFromMicros(eligibility.currentPrice),
+                    merkleRoot: eligibility.merkleRoot,
+                    proof: eligibility.proof,
+                    payoutAmount: eligibility.payoutAmount,
+                    checkedAt: Date.now()
+                }
+            });
+
+            const nextPurchaseDetails = normalizedPolicyProductId !== policy.purchaseDetails.productId
+                ? { ...policy.purchaseDetails, productId: normalizedPolicyProductId }
+                : policy.purchaseDetails;
+
+            const updatedPolicy = mergePolicyForAddress(address, policy.policyId, {
+                status: eligibility.eligible ? 'eligible' : 'ineligible',
+                purchaseDetails: nextPurchaseDetails,
+                eligibility: {
+                    checkedAt: Date.now(),
+                    dropPercentage: eligibility.dropPercentage,
+                    dropAmount: eligibility.dropAmount,
+                    currentPrice: eligibility.currentPrice,
+                    merkleRoot: eligibility.merkleRoot,
+                    proof: eligibility.proof,
+                    payoutAmount: eligibility.payoutAmount
+                }
+            });
+
+            if (updatedPolicy) {
+                setPolicies(prev => prev.map(existing => existing.policyId === policy.policyId ? updatedPolicy : existing));
+            }
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : 'Failed to check claim eligibility.';
+            console.error('Eligibility check failed:', error);
+            updateClaimState(policy.policyId, { status: 'error', error: message });
+        }
+    }, [address, updateClaimState]);
+
+    const handleSubmitClaim = useCallback(async (policy: PolicyData) => {
+        if (!address || !signer) {
+            alert('Please connect your wallet to submit a claim.');
+            return;
+        }
+
+        const claimState = claimStates[policy.policyId];
+        if (!claimState || !claimState.eligibility || !claimState.eligibility.proof) {
+            alert('Please check claim eligibility before submitting.');
+            return;
+        }
+
+        if (!/^[0-9]+$/.test(policy.policyId)) {
+            alert('Policy ID is invalid.');
+            return;
+        }
+
+        updateClaimState(policy.policyId, { status: 'claiming', error: undefined });
+
+        try {
+            const formattedRoot = formatMerkleRoot(claimState.eligibility.merkleRoot);
+            const proofResult = await generateClaimProof(policy, claimState.eligibility.proof, claimState.eligibility.merkleRoot);
+
+            const vault = await getInsuranceVaultContractWithSigner(signer) as InsuranceVaultContract;
+
+            const [onChainRoot, storedPolicy] = await Promise.all([
+                vault.priceMerkleRoot(),
+                vault.policies(BigInt(policy.policyId))
+            ]);
+
+            if (onChainRoot.toLowerCase() !== formattedRoot.toLowerCase()) {
+                throw new Error('Latest on-chain Merkle root does not match oracle root.');
+            }
+
+            const walletAddress = await signer.getAddress();
+            if (storedPolicy.buyer.toLowerCase() !== walletAddress.toLowerCase()) {
+                throw new Error('This policy belongs to another wallet.');
+            }
+
+            if (storedPolicy.alreadyClaimed) {
+                throw new Error('Policy is already claimed on-chain.');
+            }
+
+            const policyIdBig = BigInt(policy.policyId);
+            const commitmentHex = ethers.zeroPadValue(policy.secretCommitment, 32);
+            const premiumBig = BigInt(policy.premium);
+            const publicSignals = formatPublicSignals(proofResult.publicSignals);
+
+            const tx = await vault.claimPayout(
+                policyIdBig,
+                commitmentHex,
+                formattedRoot,
+                BigInt(policy.policyPurchaseDate),
+                premiumBig,
+                proofResult.proof.a,
+                proofResult.proof.b,
+                proofResult.proof.c,
+                publicSignals
+            );
+
+            const receiptNullable = await tx.wait();
+            if (!receiptNullable) {
+                throw new Error('Claim transaction did not return a receipt.');
+            }
+
+            const receipt = receiptNullable as ContractTransactionReceipt;
+
+            updateClaimState(policy.policyId, {
+                status: 'claimed',
+                txHash: receipt.hash
+            });
+
+            const updatedPolicy = mergePolicyForAddress(address, policy.policyId, {
+                status: 'claimed',
+                claimTxHash: receipt.hash,
+                claimedAt: Math.floor(Date.now() / 1000),
+                eligibility: {
+                    ...(policy.eligibility || {}),
+                    checkedAt: Date.now(),
+                    dropPercentage: claimState.eligibility.dropPercentage,
+                    dropAmount: claimState.eligibility.dropAmountMicros,
+                    currentPrice: claimState.eligibility.currentPriceMicros,
+                    merkleRoot: claimState.eligibility.merkleRoot,
+                    proof: claimState.eligibility.proof,
+                    payoutAmount: claimState.eligibility.payoutAmount
+                }
+            });
+
+            if (updatedPolicy) {
+                setPolicies(prev => prev.map(existing => existing.policyId === policy.policyId ? updatedPolicy : existing));
+            } else {
+                setPolicies(getPoliciesForAddress(address));
+            }
+        } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : 'Claim submission failed.';
+            console.error('Claim submission failed:', error);
+            updateClaimState(policy.policyId, { status: 'error', error: message });
+        }
+    }, [address, signer, claimStates, updateClaimState]);
 
     const statusText = useMemo(
         () => resolveProcessingStatusText(processingState, mounted, orderInfo),
@@ -626,134 +957,175 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                         <p className={styles.policyEmpty}>No saved policies found for this wallet yet.</p>
                     ) : (
                         <div className={styles.policyCards}>
-                            {policies.map(policy => (
-                                <div className={styles.policyCard} key={policy.transactionHash}>
-                                    <div className={styles.policyCardHeader}>
-                                        <div className={styles.policyMeta}>
-                                            <span className={styles.policyId}>Policy #{policy.policyId}</span>
-                                            <span className={styles.policyDate}>Purchased {formatTimestamp(toNumber(policy.policyPurchaseDate))}</span>
-                                            <span className={styles.policyNetwork}>Network: {policy.network || 'Unknown'}</span>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            className={styles.policyClaimButton}
-                                            onClick={() => handleCheckClaim(policy)}
-                                        >
-                                            Check For Claim
-                                        </button>
-                                    </div>
+                            {policies.map(policy => {
+                                const claimState = claimStates[policy.policyId] || { status: policy.status || 'active' };
+                                const isEligible = claimState.status === 'eligible';
+                                const isClaimed = claimState.status === 'claimed' || policy.status === 'claimed';
+                                const isChecking = claimState.status === 'checking';
+                                const isClaiming = claimState.status === 'claiming';
 
-                                    <div className={styles.policyDetailSection}>
-                                        <h4 className={styles.policySectionTitle}>Coverage Summary</h4>
-                                        <div className={styles.policyDetailGrid}>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Premium</span>
-                                                <span className={styles.policyDetailValue}>{formatUsdcValue(policy.premium)}</span>
+                                return (
+                                    <div className={styles.policyCard} key={policy.transactionHash}>
+                                        <div className={styles.policyCardHeader}>
+                                            <div className={styles.policyMeta}>
+                                                <span className={styles.policyId}>Policy #{policy.policyId}</span>
+                                                <span className={styles.policyDate}>Purchased {formatTimestamp(toNumber(policy.policyPurchaseDate))}</span>
+                                                <span className={styles.policyNetwork}>Network: {policy.network || 'Unknown'}</span>
                                             </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Invoice Price</span>
-                                                <span className={styles.policyDetailValue}>{formatUsdcValue(policy.purchaseDetails.invoicePrice)}</span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Tier</span>
-                                                <span className={styles.policyDetailValue}>Tier {policy.tier}</span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Invoice Date</span>
-                                                <span className={styles.policyDetailValue}>{formatTimestamp(toNumber(policy.purchaseDetails.invoiceDate))}</span>
+                                            <div className={styles.policyActionsHeader}>
+                                                <span className={styles.policyStatusBadge} data-status={isClaimed ? 'claimed' : claimState.status}>
+                                                    {isClaimed ? 'Claimed' : claimState.status === 'eligible' ? 'Eligible' : claimState.status === 'ineligible' ? 'Not Eligible' : claimState.status === 'claiming' ? 'Claiming…' : claimState.status === 'checking' ? 'Checking…' : 'Active'}
+                                                </span>
+                                                <div className={styles.policyActionButtons}>
+                                                    {isEligible && !isClaimed ? (
+                                                        <button
+                                                            type="button"
+                                                            className={styles.policyClaimButton}
+                                                            onClick={() => handleSubmitClaim(policy)}
+                                                            disabled={isClaiming}
+                                                        >
+                                                            {isClaiming ? 'Claiming…' : 'Claim Payout'}
+                                                        </button>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            className={styles.policyClaimSecondaryButton}
+                                                            onClick={() => handleCheckClaim(policy)}
+                                                            disabled={isChecking || isClaimed}
+                                                        >
+                                                            {isClaimed ? 'Already Claimed' : isChecking ? 'Checking…' : 'Check Claim'}
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
 
-                                    <div className={styles.policyDetailSection}>
-                                        <h4 className={styles.policySectionTitle}>Identifiers</h4>
-                                        <div className={styles.policyDetailGrid}>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Product ID</span>
-                                                <span className={styles.policyDetailValue}>{policy.purchaseDetails.productId || 'Unknown'}</span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Transaction Hash</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.transactionHash}
-                                                >
-                                                    {shortenValue(policy.transactionHash, 10, 8)}
-                                                </span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Order Hash</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.purchaseDetails.orderHash}
-                                                >
-                                                    {shortenValue(policy.purchaseDetails.orderHash, 10, 8)}
-                                                </span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Product Hash</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.purchaseDetails.productHash}
-                                                >
-                                                    {shortenValue(policy.purchaseDetails.productHash, 10, 8)}
-                                                </span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Salt</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.purchaseDetails.salt}
-                                                >
-                                                    {shortenValue(policy.purchaseDetails.salt, 10, 8)}
-                                                </span>
-                                            </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Secret Commitment</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.secretCommitment}
-                                                >
-                                                    {shortenValue(policy.secretCommitment, 10, 8)}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
+                                        {claimState.error && !claimState.eligibility && (
+                                            <p className={styles.policyError}>{claimState.error}</p>
+                                        )}
 
-                                    <div className={styles.policyDetailSection}>
-                                        <h4 className={styles.policySectionTitle}>Contract References</h4>
-                                        <div className={styles.policyDetailGrid}>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Vault</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.contracts.vault}
-                                                >
-                                                    {shortenValue(policy.contracts.vault, 10, 8)}
-                                                </span>
+                                        <div className={styles.policyDetailSection}>
+                                            <h4 className={styles.policySectionTitle}>Coverage Summary</h4>
+                                            <div className={styles.policyDetailGrid}>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Premium</span>
+                                                    <span className={styles.policyDetailValue}>{formatUsdcValue(policy.premium)}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Invoice Price</span>
+                                                    <span className={styles.policyDetailValue}>{formatUsdcValue(policy.purchaseDetails.invoicePrice)}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Tier</span>
+                                                    <span className={styles.policyDetailValue}>Tier {policy.tier}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Invoice Date</span>
+                                                    <span className={styles.policyDetailValue}>{formatTimestamp(toNumber(policy.purchaseDetails.invoiceDate))}</span>
+                                                </div>
                                             </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Payment Token</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.contracts.token}
-                                                >
-                                                    {shortenValue(policy.contracts.token, 10, 8)}
-                                                </span>
+                                        </div>
+
+                                        {claimState.eligibility && (
+                                            <div className={styles.policyDetailSection}>
+                                                <h4 className={styles.policySectionTitle}>Claim Eligibility</h4>
+                                            <div className={styles.policyDetailGrid}>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Current Price</span>
+                                                    <span className={styles.policyDetailValue}>{claimState.eligibility.formattedCurrent}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Price Drop</span>
+                                                    <span className={styles.policyDetailValue}>{claimState.eligibility.formattedDrop}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Drop %</span>
+                                                    <span className={styles.policyDetailValue}>{claimState.eligibility.dropPercentage.toFixed(2)}%</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Potential Payout</span>
+                                                    <span className={styles.policyDetailValue}>{formatUsdFromMicros(claimState.eligibility.payoutAmount)}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Checked</span>
+                                                    <span className={styles.policyDetailValue}>{new Date(claimState.eligibility.checkedAt).toLocaleString()}</span>
+                                                </div>
                                             </div>
-                                            <div className={styles.policyDetail}>
-                                                <span className={styles.policyDetailLabel}>Verifier</span>
-                                                <span
-                                                    className={`${styles.policyDetailValue} ${styles.policyDetailMono}`}
-                                                    title={policy.contracts.verifier}
-                                                >
-                                                    {shortenValue(policy.contracts.verifier, 10, 8)}
-                                                </span>
+                                                {claimState.error && (
+                                                    <p className={styles.policyError}>{claimState.error}</p>
+                                                )}
+                                                {claimState.txHash && (
+                                                    <p className={styles.policySuccess}>Claimed in transaction {claimState.txHash}</p>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <div className={styles.policyDetailSection}>
+                                            <h4 className={styles.policySectionTitle}>Identifiers</h4>
+                                            <div className={styles.policyDetailGrid}>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Product ID</span>
+                                                    <span className={styles.policyDetailValue}>{policy.purchaseDetails.productId || 'Unknown'}</span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Transaction Hash</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.transactionHash}>
+                                                        {shortenValue(policy.transactionHash, 10, 8)}
+                                                    </span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Order Hash</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.purchaseDetails.orderHash}>
+                                                        {shortenValue(policy.purchaseDetails.orderHash, 10, 8)}
+                                                    </span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Product Hash</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.purchaseDetails.productHash}>
+                                                        {shortenValue(policy.purchaseDetails.productHash, 10, 8)}
+                                                    </span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Salt</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.purchaseDetails.salt}>
+                                                        {shortenValue(policy.purchaseDetails.salt, 10, 8)}
+                                                    </span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Secret Commitment</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.secretCommitment}>
+                                                        {shortenValue(policy.secretCommitment, 10, 8)}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className={styles.policyDetailSection}>
+                                            <h4 className={styles.policySectionTitle}>Contract References</h4>
+                                            <div className={styles.policyDetailGrid}>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Vault</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.contracts.vault}>
+                                                        {shortenValue(policy.contracts.vault, 10, 8)}
+                                                    </span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Payment Token</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.contracts.token}>
+                                                        {shortenValue(policy.contracts.token, 10, 8)}
+                                                    </span>
+                                                </div>
+                                                <div className={styles.policyDetail}>
+                                                    <span className={styles.policyDetailLabel}>Verifier</span>
+                                                    <span className={`${styles.policyDetailValue} ${styles.policyDetailMono}`} title={policy.contracts.verifier}>
+                                                        {shortenValue(policy.contracts.verifier, 10, 8)}
+                                                    </span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
-                                </div>
-                            ))}
+                                );
+                            })}
                         </div>
                     )}
                 </div>

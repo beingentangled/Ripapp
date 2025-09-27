@@ -1,15 +1,16 @@
 import * as fs from "fs/promises";
 import * as path from "path";
+import type { InterfaceAbi, ContractRunner, BaseContract } from "ethers";
 
 /**
  * Load contract ABI from compiled contract artifacts
  */
-export async function loadContractABI(contractName: string): Promise<any[]> {
+export async function loadContractABI(contractName: string): Promise<InterfaceAbi> {
   const abiPath = path.join(__dirname, `../../contracts/out/${contractName}.sol/${contractName}.json`);
 
   try {
     const contractData = await fs.readFile(abiPath, "utf-8");
-    const parsed = JSON.parse(contractData);
+    const parsed = JSON.parse(contractData) as { abi: InterfaceAbi };
     return parsed.abi;
   } catch (error) {
     throw new Error(`Failed to load ABI for ${contractName}: ${error}`);
@@ -31,7 +32,7 @@ export async function loadDeploymentAddresses(): Promise<{
     const deploymentData = await fs.readFile(deploymentPath, "utf-8");
     return JSON.parse(deploymentData);
   } catch (error) {
-    console.log("Could not load deployment.json, using environment variables");
+    console.warn("Could not load deployment.json, using environment variables", error);
     return {
       vault: process.env.CONTRACT_ADDRESS,
       verifier: process.env.VERIFIER_ADDRESS,
@@ -42,7 +43,11 @@ export async function loadDeploymentAddresses(): Promise<{
 /**
  * Get contract instance with automatically loaded ABI
  */
-export async function getContractInstance(contractName: string, address: string, signerOrProvider: any): Promise<any> {
+export async function getContractInstance(
+  contractName: string,
+  address: string,
+  signerOrProvider: ContractRunner
+): Promise<BaseContract> {
   const { ethers } = await import("ethers");
   const abi = await loadContractABI(contractName);
   return new ethers.Contract(address, abi, signerOrProvider);

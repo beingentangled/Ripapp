@@ -81,26 +81,29 @@ async function writeProducts(products: Product[]): Promise<void> {
     await fs.writeFile(dataFile, JSON.stringify(products, null, 2), 'utf8');
 }
 
-function setCorsHeaders(res: NextApiResponse) {
+function setCorsHeaders(res: NextApiResponse): void {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
     setCorsHeaders(res);
 
     if (req.method === 'OPTIONS') {
-        return res.status(204).end();
+        res.status(204).end();
+        return;
     }
 
     if (req.method === 'GET') {
         try {
             const products = await readProducts();
-            return res.status(200).json(products);
+            res.status(200).json(products);
+            return;
         } catch (error) {
             console.error('Failed to read products.json:', error);
-            return res.status(500).json({ error: 'Failed to load products' });
+            res.status(500).json({ error: 'Failed to load products' });
+            return;
         }
     }
 
@@ -109,12 +112,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             const { id, name, basePrice } = req.body || {};
 
             if (!id || typeof id !== 'string') {
-                return res.status(400).json({ error: 'Product id is required' });
+                res.status(400).json({ error: 'Product id is required' });
+                return;
             }
 
             const normalizedId = id.trim().toUpperCase();
             if (!normalizedId) {
-                return res.status(400).json({ error: 'Product id cannot be empty' });
+                res.status(400).json({ error: 'Product id cannot be empty' });
+                return;
             }
 
             const resolvedName = typeof name === 'string' && name.trim().length > 0
@@ -123,7 +128,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
             const numericBasePrice = Number(basePrice);
             if (!Number.isFinite(numericBasePrice) || numericBasePrice <= 0) {
-                return res.status(400).json({ error: 'basePrice must be a positive number' });
+                res.status(400).json({ error: 'basePrice must be a positive number' });
+                return;
             }
 
             const roundedBasePrice = Math.round(numericBasePrice);
@@ -145,13 +151,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
             await writeProducts(products);
 
-            return res.status(200).json(product);
+            res.status(200).json(product);
+            return;
         } catch (error) {
             console.error('Failed to update products.json:', error);
-            return res.status(500).json({ error: 'Failed to update products' });
+            res.status(500).json({ error: 'Failed to update products' });
+            return;
         }
     }
 
     res.setHeader('Allow', ['GET', 'POST', 'OPTIONS']);
-    return res.status(405).json({ error: `Method ${req.method} Not Allowed` });
+    res.status(405).json({ error: `Method ${req.method} Not Allowed` });
 }

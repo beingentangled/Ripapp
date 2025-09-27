@@ -24,6 +24,18 @@ export interface PolicyData {
     };
     createdAt: string;
     network: string;
+    status?: 'active' | 'eligible' | 'ineligible' | 'claimed';
+    eligibility?: {
+        checkedAt: number;
+        dropPercentage: number;
+        dropAmount: string;
+        currentPrice: string;
+        merkleRoot?: string;
+        proof?: any;
+        payoutAmount?: string;
+    };
+    claimTxHash?: string;
+    claimedAt?: number;
 }
 
 export interface CommitmentData {
@@ -115,8 +127,47 @@ export function generatePolicyData(
         tier: commitmentData.tier,
         contracts: contractAddresses,
         createdAt: now.toISOString(),
-        network: process.env.NEXT_PUBLIC_CHAIN_ID === '31337' ? 'anvil-local' : 'unknown'
+        network: process.env.NEXT_PUBLIC_CHAIN_ID === '31337' ? 'anvil-local' : 'unknown',
+        status: 'active'
     };
+}
+
+export function updatePolicyForAddress(
+    walletAddress: string,
+    policyId: string,
+    updater: (policy: PolicyData) => PolicyData
+): PolicyData | null {
+    if (typeof window === 'undefined') return null;
+
+    try {
+        const key = `zkpp_policies_${walletAddress.toLowerCase()}`;
+        const existingPolicies = getPoliciesForAddress(walletAddress);
+        const index = existingPolicies.findIndex(policy => policy.policyId === policyId);
+
+        if (index === -1) {
+            return null;
+        }
+
+        const updatedPolicy = updater({ ...existingPolicies[index] });
+        existingPolicies[index] = updatedPolicy;
+        localStorage.setItem(key, JSON.stringify(existingPolicies, null, 2));
+        return updatedPolicy;
+    } catch (error) {
+        console.error('Error updating policy in localStorage:', error);
+        return null;
+    }
+}
+
+export function mergePolicyForAddress(
+    walletAddress: string,
+    policyId: string,
+    updates: Partial<PolicyData>
+): PolicyData | null {
+    return updatePolicyForAddress(walletAddress, policyId, (policy) => ({
+        ...policy,
+        ...updates,
+        eligibility: updates.eligibility ? { ...policy.eligibility, ...updates.eligibility } : policy.eligibility
+    }));
 }
 
 // Get commitment data for a specific wallet address

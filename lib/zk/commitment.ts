@@ -33,7 +33,7 @@ export const TIER_BOUNDARIES: TierBoundary[] = [
     { min: BigInt(2000000000), max: BigInt(10000000000), tier: 5, premium: BigInt(20000000) }, // $2000-10000 → $20
 ];
 
-const TOKEN_MULTIPLIER = 1_000_000n; // USDC 6 decimals
+const TOKEN_MULTIPLIER = BigInt(1_000_000); // USDC 6 decimals
 
 export async function buildCommitment(invoiceData: InvoiceData) {
     console.log('🔧 Building commitment for:', invoiceData);

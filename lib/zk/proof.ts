@@ -61,10 +61,23 @@ export async function generateZKProof(
             new Uint8Array(zkeyBuffer)
         );
 
-        return {
-            proof,
-            publicSignals,
+        const pi_a = Array.isArray(proof.pi_a) ? proof.pi_a.slice(0, 2) : [];
+        const pi_b = Array.isArray(proof.pi_b) ? proof.pi_b.slice(0, 2) : [];
+        const pi_c = Array.isArray(proof.pi_c) ? proof.pi_c.slice(0, 2) : [];
+
+        const normalized: ProofData = {
+            proof: {
+                pi_a: [pi_a[0] ?? '0', pi_a[1] ?? '0'],
+                pi_b: [
+                    [pi_b[0]?.[0] ?? '0', pi_b[0]?.[1] ?? '0'],
+                    [pi_b[1]?.[0] ?? '0', pi_b[1]?.[1] ?? '0']
+                ],
+                pi_c: [pi_c[0] ?? '0', pi_c[1] ?? '0']
+            },
+            publicSignals: publicSignals.map(signal => signal.toString())
         };
+
+        return normalized;
     } catch (error) {
         console.error('ZK proof generation failed:', error);
         throw new Error(`Failed to generate ZK proof: ${error}`);

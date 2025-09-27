@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import Image from 'next/image';
 import styles from '../../../styles/InvoiceWidget.module.css';
 import { OrderItem } from '../../../utils/storage';
 import { ZkPurchaseState } from './types';
@@ -20,6 +21,11 @@ const OrderItemCard: React.FC<OrderItemCardProps> = ({
     zkState,
     onClearZkError
 }) => {
+    const [imageError, setImageError] = useState(false);
+
+    useEffect(() => {
+        setImageError(false);
+    }, [item.imageUrl]);
     const isProcessingItem = zkState.processing && zkState.selectedItem === item;
     const isItemWithError = zkState.error && zkState.selectedItem === item;
     const showCommitmentData = isProcessingItem && zkState.commitmentData;
@@ -54,15 +60,14 @@ const OrderItemCard: React.FC<OrderItemCardProps> = ({
     return (
         <div className={styles.itemCard}>
             <div className={styles.itemHeader}>
-                {item.imageUrl ? (
-                    <img
+                {item.imageUrl && !imageError ? (
+                    <Image
                         src={item.imageUrl}
                         alt={item.name}
+                        width={96}
+                        height={96}
                         className={styles.itemImage}
-                        onError={(e) => {
-                            e.currentTarget.style.display = 'none';
-                            e.currentTarget.nextElementSibling?.classList.remove('hidden');
-                        }}
+                        onError={() => setImageError(true)}
                     />
                 ) : (
                     <div className={styles.itemImagePlaceholder}>
