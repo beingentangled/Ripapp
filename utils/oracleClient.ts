@@ -37,12 +37,9 @@ export interface EligibilityResult {
 
 const DEFAULT_DROP_THRESHOLD = 10; // percent
 
-const ORACLE_BASE_URL = (typeof window !== 'undefined'
-    ? window.localStorage.getItem('ripextension_oracle_url')
-    : null) || process.env.NEXT_PUBLIC_ORACLE_URL || 'http://localhost:3001';
 
 function buildEndpoint(endpoint: string): string {
-    return `${ORACLE_BASE_URL.replace(/\/$/, '')}${endpoint}`;
+    return process.env.NEXT_PUBLIC_ORACLE_URL + endpoint;
 }
 
 function normalizeOracleProductId(value: string): string {
