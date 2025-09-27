@@ -1,9 +1,9 @@
 export interface OraclePrice {
     id: string;
     name: string;
-    currentPrice: number;
-    basePrice: number;
-    change: number;
+    currentPrice?: number;
+    basePrice?: number;
+    change?: number;
 }
 
 export interface OraclePricesResponse {
@@ -98,7 +98,18 @@ export async function checkEligibility(
         console.warn('ripextension: Oracle proof root does not match reported merkle root.', { proofRoot: proof.root, merkleRoot });
     }
 
-    const currentPrice = BigInt(matchedProduct.currentPrice);
+    const rawCurrentPrice = matchedProduct.currentPrice ?? matchedProduct.basePrice;
+
+    if (rawCurrentPrice === undefined || rawCurrentPrice === null) {
+        throw new Error(`Oracle price data missing for product ${matchedProduct.id}.`);
+    }
+
+    let currentPrice: bigint;
+    try {
+        currentPrice = BigInt(rawCurrentPrice);
+    } catch (error) {
+        throw new Error(`Oracle returned invalid price for product ${matchedProduct.id}.`);
+    }
     const dropAmount = originalPrice > currentPrice ? originalPrice - currentPrice : BigInt(0);
     const originalPriceNumber = Number(originalPrice.toString());
     const dropAmountNumber = Number(dropAmount.toString());
