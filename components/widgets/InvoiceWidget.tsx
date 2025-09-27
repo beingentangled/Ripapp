@@ -381,10 +381,14 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             setZkError(null);
             setSelectedZkItem(item);
 
+            const usdPrice = typeof (item as any).priceUsdValue === 'number'
+                ? Number((item as any).priceUsdValue)
+                : parseFloat((item.price || '').replace(/[^0-9.]/g, '')) || 0;
+
             const invoiceData: InvoiceData = {
                 orderNumber: item.orderId || `ORDER_${Date.now()}`,
                 productId: item.asin || `PRODUCT_${Date.now()}`,
-                purchasePriceUsd: parseFloat(item.price?.replace(/[₹$,]/g, '') || '0'),
+                purchasePriceUsd: usdPrice,
                 purchaseDate: item.orderDate ?
                     new Date(item.orderDate).toISOString().split('T')[0] :
                     new Date().toISOString().split('T')[0]
