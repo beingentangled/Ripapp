@@ -25,6 +25,117 @@ import { checkEligibility, formatUsdFromMicros } from '../../utils/oracleClient'
 import type { OracleMerkleProof } from '../../utils/oracleClient';
 import { generateClaimProof, formatMerkleRoot, formatPublicSignals } from '../../utils/zkClaimProof';
 
+type SweetAlertType = typeof import('sweetalert2')['default'];
+type ConfettiFn = typeof import('canvas-confetti');
+type LottiePlayer = typeof import('lottie-web')['default'];
+type LottieAnimationItem = import('lottie-web').AnimationItem;
+
+let sweetAlertPromise: Promise<SweetAlertType> | null = null;
+const getSweetAlert = async (): Promise<SweetAlertType> => {
+    if (!sweetAlertPromise) {
+        sweetAlertPromise = import('sweetalert2').then(module => module.default);
+    }
+    return sweetAlertPromise;
+};
+
+let confettiPromise: Promise<ConfettiFn> | null = null;
+const getConfetti = async (): Promise<ConfettiFn> => {
+    if (!confettiPromise) {
+        confettiPromise = import('canvas-confetti').then(module => module.default);
+    }
+    return confettiPromise;
+};
+
+let lottiePromise: Promise<LottiePlayer> | null = null;
+const getLottie = async (): Promise<LottiePlayer> => {
+    if (!lottiePromise) {
+        lottiePromise = import('lottie-web').then(module => module.default);
+    }
+    return lottiePromise;
+};
+
+let certificateAnimationPromise: Promise<Record<string, unknown>> | null = null;
+const getCertificateAnimationData = async (): Promise<Record<string, unknown>> => {
+    if (!certificateAnimationPromise) {
+        certificateAnimationPromise = import('../../certificate_animation.json').then(module => module.default as Record<string, unknown>);
+    }
+    return certificateAnimationPromise;
+};
+
+const createPurchaseModalHtml = (): string => `
+    <div id="purchase-modal-animation" style="width: 160px; max-width: 100%; margin: 0 auto 16px;"></div>
+    <p id="purchase-modal-message" style="margin: 0; font-size: 14px; color: #4a5568; text-align: center;"></p>
+`;
+
+const createPurchaseSuccessHtml = (message: string): string => `
+    <div id="purchase-success-animation" style="width: 160px; max-width: 100%; margin: 0 auto 16px;"></div>
+    <p style="margin: 0; font-size: 14px; color: #4a5568; text-align: center;">${message}</p>
+`;
+
+const setPurchaseModalMessage = (swal: SweetAlertType | null, message: string): void => {
+    const popup = swal?.getPopup();
+    const messageElement = popup?.querySelector<HTMLParagraphElement>('#purchase-modal-message');
+    if (messageElement) {
+        messageElement.textContent = message;
+    }
+};
+
+let activePurchaseAnimation: LottieAnimationItem | null = null;
+const destroyActivePurchaseAnimation = (): void => {
+    if (activePurchaseAnimation) {
+        activePurchaseAnimation.destroy();
+        activePurchaseAnimation = null;
+    }
+};
+
+const showAlertWithLottie = async (title: string, message: string, type: 'info' | 'error' | 'warning' = 'info'): Promise<void> => {
+    try {
+        const Swal = await getSweetAlert();
+        void Swal.fire({
+            title: title,
+            html: `
+                <div id="alert-modal-animation" style="width: 160px; height: 160px; margin: 0 auto 1rem;"></div>
+                <p style="font-size: 1rem; color: #666; margin: 0; text-align: center;">${message}</p>
+            `,
+            confirmButtonText: 'OK',
+            didOpen: async () => {
+                const container = Swal?.getPopup()?.querySelector<HTMLDivElement>('#alert-modal-animation') || null;
+                await initializePurchaseAnimation(container);
+            },
+            willClose: () => {
+                destroyActivePurchaseAnimation();
+            }
+        });
+    } catch (error) {
+        console.warn('Failed to show SweetAlert, falling back to regular alert:', error);
+        alert(message);
+    }
+};
+
+const initializePurchaseAnimation = async (container: HTMLDivElement | null): Promise<void> => {
+    if (!container) {
+        return;
+    }
+
+    try {
+        const [lottie, animationData] = await Promise.all([
+            getLottie(),
+            getCertificateAnimationData()
+        ]);
+
+        destroyActivePurchaseAnimation();
+        activePurchaseAnimation = lottie.loadAnimation({
+            container,
+            renderer: 'svg',
+            loop: true,
+            autoplay: true,
+            animationData
+        });
+    } catch (animationError) {
+        console.warn('ripextension: Failed to initialize purchase animation:', animationError);
+    }
+};
+
 type ExtendedOrderItem = OrderItem & {
     orderId?: string;
     shipmentId?: string;
@@ -505,15 +616,31 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
     };
 
     const handleItemInsure = async (item: OrderItem) => {
+        let Swal: SweetAlertType | null = null;
         try {
             if (!isConnected || !signer || !address) {
-                alert('Please connect your wallet first using the wallet connect button in the top navigation.');
+                await showAlertWithLottie('Wallet Required', 'Please connect your wallet first using the wallet connect button in the top navigation.', 'warning');
                 return;
             }
 
             setZkProcessing(true);
             setZkError(null);
             setSelectedZkItem(item);
+
+            Swal = await getSweetAlert();
+            void Swal.fire({
+                title: 'Preparing purchase',
+                html: createPurchaseModalHtml(),
+                allowEscapeKey: false,
+                allowOutsideClick: false,
+                showConfirmButton: false,
+                didOpen: async () => {
+                    Swal?.showLoading();
+                    setPurchaseModalMessage(Swal, 'Generating zero-knowledge commitment...');
+                    const container = Swal?.getPopup()?.querySelector<HTMLDivElement>('#purchase-modal-animation') || null;
+                    await initializePurchaseAnimation(container);
+                }
+            });
 
             const extendedItem = item as ExtendedOrderItem;
             const invoiceUnitPrice = extendedItem.invoiceDetails?.unitPrice;
@@ -575,6 +702,9 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
 
             const { commitment, details, tier, premium } = buildCommitmentResult;
 
+            Swal?.update({ title: 'Preparing purchase' });
+            setPurchaseModalMessage(Swal, 'Commitment generated. Preparing transaction...');
+
             const zkDataObject: ZkCommitmentDisplayData = {
                 commitment,
                 tier,
@@ -619,11 +749,44 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             //     console.log('Token approval confirmed');
             // }
 
+            Swal?.update({ title: 'Purchasing policy' });
+            setPurchaseModalMessage(Swal, 'Awaiting transaction confirmation in your wallet...');
+
             setZkStep('purchasing');
             console.log('Purchasing policy with commitment:', commitment);
             console.log('Premium amount:', ethers.formatUnits(premium, 6), 'USDC');
 
             const tx = await vaultContract.buyPolicy(commitment, premium);
+
+            // Show money stack animation after transaction submitted
+            Swal?.update({
+                title: 'Processing Payment',
+                html: `<div id="payment-process-animation" style="width: 180px; height: 140px; margin: 0 auto 1rem;"></div>
+                       <p id="purchase-modal-message" style="font-size: 1rem; color: #666; margin: 0; text-align: center;">Transaction submitted. Processing payment...</p>`
+            });
+
+            // Initialize money stack animation
+            const paymentContainer = Swal?.getPopup()?.querySelector('#payment-process-animation');
+            if (paymentContainer) {
+                try {
+                    // Destroy previous animation first
+                    destroyActivePurchaseAnimation();
+
+                    const lottie = await import('lottie-web');
+                    const animationData = (await import('../../money_stack.json')).default;
+                    activePurchaseAnimation = lottie.default.loadAnimation({
+                        container: paymentContainer,
+                        renderer: 'svg',
+                        loop: true,
+                        autoplay: true,
+                        animationData
+                    });
+                } catch (animError) {
+                    console.warn('Failed to load payment animation:', animError);
+                }
+            }
+
+            setPurchaseModalMessage(Swal, 'Transaction submitted. Waiting for confirmation...');
 
             console.log('Policy purchase transaction sent:', tx.hash);
             const receiptNullable = await tx.wait();
@@ -632,6 +795,9 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             }
 
             const receipt = receiptNullable as ContractTransactionReceipt;
+
+            Swal?.update({ title: 'Finalizing purchase' });
+            setPurchaseModalMessage(Swal, 'Confirming policy details...');
 
             const policyBoughtEvent = receipt.logs.find((log: Log) => {
                 try {
@@ -730,6 +896,38 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
 
             console.log('Policy and commitment data saved to localStorage');
 
+            if (Swal?.isVisible()) {
+                destroyActivePurchaseAnimation();
+                Swal.close();
+            }
+
+            if (typeof window !== 'undefined') {
+                try {
+                    const confetti = await getConfetti();
+                    confetti({ particleCount: 160, spread: 100, origin: { y: 0.7 } });
+                    window.setTimeout(() => {
+                        confetti({ particleCount: 120, spread: 70, origin: { y: 0.6 } });
+                    }, 200);
+                } catch (confettiError) {
+                    console.warn('ripextension: Failed to launch confetti celebration:', confettiError);
+                }
+            }
+
+            if (Swal) {
+                void Swal.fire({
+                    title: 'Policy purchased!',
+                    html: createPurchaseSuccessHtml('Your insurance coverage is now active.'),
+                    confirmButtonText: 'Great!',
+                    didOpen: async () => {
+                        const container = Swal?.getPopup()?.querySelector<HTMLDivElement>('#purchase-success-animation') || null;
+                        await initializePurchaseAnimation(container);
+                    },
+                    willClose: () => {
+                        destroyActivePurchaseAnimation();
+                    }
+                });
+            }
+
             setZkStep('success');
 
             const itemKey = `${item.asin || item.name}_${item.quantity}`;
@@ -745,9 +943,35 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
         } catch (error: unknown) {
             console.error('ZK Policy purchase failed:', error);
             const message = error instanceof Error ? error.message : 'Unknown error occurred';
+
+            if (Swal) {
+                if (Swal.isVisible()) {
+                    destroyActivePurchaseAnimation();
+                    Swal.close();
+                }
+                void Swal.fire({
+                    title: 'Purchase failed',
+                    html: `
+                        <div id="error-modal-animation" style="width: 200px; height: 200px; margin: 0 auto 1rem;"></div>
+                        <p style="font-size: 1rem; color: #666; margin: 0;">${message}</p>
+                    `,
+                    confirmButtonText: 'Dismiss',
+                    didOpen: async () => {
+                        const container = Swal?.getPopup()?.querySelector<HTMLDivElement>('#error-modal-animation') || null;
+                        await initializePurchaseAnimation(container);
+                    },
+                    willClose: () => {
+                        destroyActivePurchaseAnimation();
+                    }
+                });
+            } else {
+                await showAlertWithLottie('Purchase Failed', message, 'error');
+            }
+
             setZkError(message);
             setZkStep('idle');
         } finally {
+            destroyActivePurchaseAnimation();
             setZkProcessing(false);
         }
     };
@@ -765,17 +989,17 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
 
     const handleCheckClaim = useCallback(async (policy: PolicyData) => {
         if (!address) {
-            alert('Please connect your wallet to check claims.');
+            await showAlertWithLottie('Wallet Required', 'Please connect your wallet to check claims.', 'warning');
             return;
         }
 
         if (!policy.purchaseDetails.productId || policy.purchaseDetails.productId === 'unknown') {
-            alert('Unable to determine product ID for this policy.');
+            await showAlertWithLottie('Missing Product ID', 'Unable to determine product ID for this policy.', 'error');
             return;
         }
 
         if (!/^[0-9]+$/.test(policy.policyId)) {
-            alert('Policy ID is invalid.');
+            await showAlertWithLottie('Invalid Policy', 'Policy ID is invalid.', 'error');
             return;
         }
 
@@ -835,24 +1059,48 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
 
     const handleSubmitClaim = useCallback(async (policy: PolicyData) => {
         if (!address || !signer) {
-            alert('Please connect your wallet to submit a claim.');
+            await showAlertWithLottie('Wallet Required', 'Please connect your wallet to submit a claim.', 'warning');
             return;
         }
-
         const claimState = claimStates[policy.policyId];
         if (!claimState || !claimState.eligibility || !claimState.eligibility.proof) {
-            alert('Please check claim eligibility before submitting.');
+            await showAlertWithLottie('Eligibility Check Required', 'Please check claim eligibility before submitting.', 'warning');
             return;
         }
-
         if (!/^[0-9]+$/.test(policy.policyId)) {
-            alert('Policy ID is invalid.');
+            await showAlertWithLottie('Invalid Policy', 'Policy ID is invalid.', 'error');
             return;
         }
-
         updateClaimState(policy.policyId, { status: 'claiming', error: undefined });
-
+        let Swal: SweetAlertType | null = null;
         try {
+            Swal = await getSweetAlert();
+            void Swal.fire({
+                title: 'Processing Claim',
+                html: `<div id="claim-process-animation" style="width: 180px; height: 140px; margin: 0 auto 1rem;"></div>
+                       <p style="font-size: 1rem; color: #666; margin: 0; text-align: center;">Your claim is being processed. Please wait...</p>`,
+                allowEscapeKey: false,
+                allowOutsideClick: false,
+                showConfirmButton: false,
+                didOpen: async () => {
+                    const container = Swal?.getPopup()?.querySelector('#claim-process-animation');
+                    if (container) {
+                        const lottie = (await import('lottie-web')).default;
+                        const animationData = (await import('../../money_stack.json')).default;
+                        activePurchaseAnimation = lottie.loadAnimation({
+                            container,
+                            renderer: 'svg',
+                            loop: true,
+                            autoplay: true,
+                            animationData
+                        });
+                    }
+                },
+                willClose: () => {
+                    destroyActivePurchaseAnimation();
+                }
+            });
+
             const formattedRoot = formatMerkleRoot(claimState.eligibility.merkleRoot);
             const proofResult = await generateClaimProof(policy, claimState.eligibility.proof, claimState.eligibility.merkleRoot);
 
@@ -926,10 +1174,34 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             } else {
                 setPolicies(getPoliciesForAddress(address));
             }
+
+            // Close the processing modal first
+            if (Swal?.isVisible()) {
+                Swal.close();
+            }
+
+            // Show success modal with certificate animation
+            if (Swal) {
+                void Swal.fire({
+                    title: 'Claim successful!',
+                    html: createPurchaseSuccessHtml('Your claim has been processed and funds have been transferred to your wallet.'),
+                    confirmButtonText: 'Excellent!',
+                    didOpen: async () => {
+                        const container = Swal?.getPopup()?.querySelector<HTMLDivElement>('#purchase-success-animation') || null;
+                        await initializePurchaseAnimation(container);
+                    },
+                    willClose: () => {
+                        destroyActivePurchaseAnimation();
+                    }
+                });
+            }
         } catch (error: unknown) {
             const message = error instanceof Error ? error.message : 'Claim submission failed.';
             console.error('Claim submission failed:', error);
             updateClaimState(policy.policyId, { status: 'error', error: message });
+            if (Swal?.isVisible()) {
+                Swal.close();
+            }
         }
     }, [address, signer, claimStates, updateClaimState]);
 
@@ -1050,9 +1322,9 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                                             </div>
                                         </div>
 
-                                        {claimState.eligibility && (
-                                            <div className={styles.policyDetailSection}>
-                                                <h4 className={styles.policySectionTitle}>Claim Eligibility</h4>
+                                        <div className={styles.policyDetailSection}>
+                                            <h4 className={styles.policySectionTitle}>Claim Eligibility</h4>
+                                            {claimState.eligibility ? (
                                                 <div className={styles.policyDetailGrid}>
                                                     <div className={styles.policyDetail}>
                                                         <span className={styles.policyDetailLabel}>Current Price</span>
@@ -1075,14 +1347,16 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                                                         <span className={styles.policyDetailValue}>{new Date(claimState.eligibility.checkedAt).toLocaleString()}</span>
                                                     </div>
                                                 </div>
-                                                {claimState.error && (
-                                                    <p className={styles.policyError}>{claimState.error}</p>
-                                                )}
-                                                {claimState.txHash && (
-                                                    <p className={styles.policySuccess}>Claimed in transaction {claimState.txHash}</p>
-                                                )}
-                                            </div>
-                                        )}
+                                            ) : (
+                                                <p className={styles.policyEmpty}>No eligibility data available. Click "Check Claim" to verify eligibility.</p>
+                                            )}
+                                            {claimState.error && (
+                                                <p className={styles.policyError}>{claimState.error}</p>
+                                            )}
+                                            {claimState.txHash && (
+                                                <p className={styles.policySuccess}>Claimed in transaction {claimState.txHash}</p>
+                                            )}
+                                        </div>
 
                                         <div className={styles.policyDetailSection}>
                                             <h4 className={styles.policySectionTitle}>Identifiers</h4>
