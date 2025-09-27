@@ -102,7 +102,8 @@ export function generatePolicyData(
         vault: string;
         token: string;
         verifier: string;
-    }
+    },
+    policyPurchaseTimestamp?: number
 ): PolicyData {
     const now = new Date();
     let invoiceDateSeconds: number | null = null;
@@ -132,11 +133,15 @@ export function generatePolicyData(
         invoiceDateSeconds = Math.floor(now.getTime() / 1000);
     }
 
+    const policyPurchaseDate = typeof policyPurchaseTimestamp === 'number'
+        ? Math.floor(policyPurchaseTimestamp)
+        : Math.floor(now.getTime() / 1000);
+
     return {
         policyId,
         transactionHash,
         blockNumber,
-        policyPurchaseDate: Math.floor(now.getTime() / 1000),
+        policyPurchaseDate,
         purchaseDetails: {
             orderHash: commitmentData.orderHash,
             invoicePrice: commitmentData.invoicePrice,

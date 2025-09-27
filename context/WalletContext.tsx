@@ -28,6 +28,13 @@ interface NetworkInfo {
     isSupported: boolean
 }
 
+const DEFAULT_CHAIN_ID = 11155111
+const DEFAULT_NETWORK_INFO: NetworkInfo = {
+    chainId: DEFAULT_CHAIN_ID,
+    name: getNetworkName(DEFAULT_CHAIN_ID),
+    isSupported: SUPPORTED_NETWORKS.includes(DEFAULT_CHAIN_ID)
+}
+
 interface WalletContextType {
     address: string | undefined
     isConnected: boolean
@@ -50,7 +57,7 @@ const WalletContext = createContext<WalletContextType>({
     isLoading: false,
     provider: null,
     signer: null,
-    networkInfo: { chainId: null, name: 'Unknown', isSupported: false },
+    networkInfo: DEFAULT_NETWORK_INFO,
     connectWallet: async () => { },
     disconnectWallet: async () => { },
     checkNetwork: async () => { }
@@ -65,11 +72,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
     const [provider, setProvider] = useState<BrowserProvider | null>(null)
     const [signer, setSigner] = useState<JsonRpcSigner | null>(null)
     const [isLoading, setIsLoading] = useState<boolean>(false)
-    const [networkInfo, setNetworkInfo] = useState<NetworkInfo>({
-        chainId: null,
-        name: 'Unknown',
-        isSupported: false
-    })
+    const [networkInfo, setNetworkInfo] = useState<NetworkInfo>({ ...DEFAULT_NETWORK_INFO })
 
     // Initialize provider and signer when wallet is connected
     useEffect(() => {
@@ -119,18 +122,10 @@ export function WalletProvider({ children }: WalletProviderProps) {
                 })
             } catch (error) {
                 console.error('RIP: Network check failed:', error)
-                setNetworkInfo({
-                    chainId: null,
-                    name: 'Unknown',
-                    isSupported: false
-                })
+                setNetworkInfo({ ...DEFAULT_NETWORK_INFO })
             }
         } else {
-            setNetworkInfo({
-                chainId: null,
-                name: 'Not Connected',
-                isSupported: false
-            })
+            setNetworkInfo({ ...DEFAULT_NETWORK_INFO })
         }
     }, [walletProvider, isConnected])
 
@@ -153,11 +148,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
             await disconnect()
             setProvider(null)
             setSigner(null)
-            setNetworkInfo({
-                chainId: null,
-                name: 'Not Connected',
-                isSupported: false
-            })
+            setNetworkInfo({ ...DEFAULT_NETWORK_INFO })
             console.log('RIP: Wallet disconnected')
         } catch (error) {
             console.error('RIP: Disconnect error:', error)
@@ -177,11 +168,7 @@ export function WalletProvider({ children }: WalletProviderProps) {
             checkNetwork()
         } else if (!isConnected) {
             console.log('RIP: Wallet disconnected')
-            setNetworkInfo({
-                chainId: null,
-                name: 'Not Connected',
-                isSupported: false
-            })
+            setNetworkInfo({ ...DEFAULT_NETWORK_INFO })
         }
     }, [status, isConnected, address, checkNetwork])
 

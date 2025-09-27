@@ -31,8 +31,8 @@ const anvilLocal: AppKitNetwork = {
     testnet: true
 }
 
-// 2. Set the networks - Include mainnet networks and Anvil Local
-const networks = [mainnet, arbitrum, polygon, base, optimism, sepolia, anvilLocal]
+// 2. Set the networks - Include Sepolia by default along with supported chains
+const networks = [sepolia, mainnet, arbitrum, polygon, base, optimism, anvilLocal]
 
 // 3. Create a metadata object - optional
 const metadata = {
@@ -49,6 +49,7 @@ const ethersAdapter = new EthersAdapter()
 export const appKit = createAppKit({
     adapters: [ethersAdapter],
     networks: networks as any,
+    defaultNetwork: sepolia,
     metadata,
     projectId,
     features: {

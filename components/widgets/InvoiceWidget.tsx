@@ -78,11 +78,12 @@ type InsuranceVaultContract = BaseContract & {
     priceMerkleRoot(): Promise<string>;
     policies(policyId: bigint): Promise<{
         buyer: string;
-        commitment: string;
-        premiumPaid: bigint;
-        purchaseDate: bigint;
+        secretCommitment: string;
+        policyPurchaseDate: bigint;
+        paidPremium: bigint;
         alreadyClaimed: boolean;
     }>;
+    nextPolicyId?: () => Promise<bigint>;
 };
 
 const coerceString = (...values: Array<unknown>): string | null => {
@@ -523,10 +524,10 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             const parsedPrice = typeof extendedItem.priceUsdValue === 'number'
                 ? extendedItem.priceUsdValue
                 : parsePriceToNumber(extendedItem.price ?? null)
-                    ?? parsePriceToNumber(extendedItem.orderTotal ?? null)
-                    ?? parsePriceToNumber(invoiceUnitPriceString)
-                    ?? parsePriceToNumber(orderInfo?.orderTotal ?? null)
-                    ?? 0;
+                ?? parsePriceToNumber(extendedItem.orderTotal ?? null)
+                ?? parsePriceToNumber(invoiceUnitPriceString)
+                ?? parsePriceToNumber(orderInfo?.orderTotal ?? null)
+                ?? 0;
 
             const usdPrice = parsedPrice;
 
@@ -593,29 +594,30 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
             }
 
             const insuranceVault = await getInsuranceVaultContractWithSigner(signer) as InsuranceVaultContract;
-            const paymentToken = await getPaymentTokenContract(process.env.NEXT_PUBLIC_PAYMENT_TOKEN, signer);
+            const vaultContract = insuranceVault as InsuranceVaultContract;
+            // const paymentToken = await getPaymentTokenContract(process.env.NEXT_PUBLIC_PAYMENT_TOKEN, signer);
 
-            setZkStep('approving');
+            // setZkStep('approving');
             const signerAddress = address;
             const vaultAddress = await insuranceVault.getAddress();
 
-            const tokenContract = paymentToken as PaymentTokenContract;
-            const vaultContract = insuranceVault as InsuranceVaultContract;
 
-            let currentAllowance: bigint;
-            try {
-                currentAllowance = await tokenContract.allowance(signerAddress, vaultAddress);
-            } catch (allowanceError) {
-                console.warn('ripextension: Failed to fetch current allowance, defaulting to 0.', allowanceError);
-                currentAllowance = BigInt(0);
-            }
+            // const tokenContract = paymentToken as PaymentTokenContract;
 
-            if (currentAllowance < premium) {
-                console.log('Approving token spend...');
-                const approveTx = await tokenContract.approve(vaultAddress, premium);
-                await approveTx.wait();
-                console.log('Token approval confirmed');
-            }
+            // let currentAllowance: bigint;
+            // try {
+            //     currentAllowance = await tokenContract.allowance(signerAddress, vaultAddress);
+            // } catch (allowanceError) {
+            //     console.warn('ripextension: Failed to fetch current allowance, defaulting to 0.', allowanceError);
+            //     currentAllowance = BigInt(0);
+            // }
+
+            // if (currentAllowance < premium) {
+            //     console.log('Approving token spend...');
+            //     const approveTx = await tokenContract.approve(vaultAddress, premium);
+            //     await approveTx.wait();
+            //     console.log('Token approval confirmed');
+            // }
 
             setZkStep('purchasing');
             console.log('Purchasing policy with commitment:', commitment);
@@ -646,7 +648,27 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 policyId = parsed?.args?.policyId?.toString() || 'unknown';
             }
 
+            if (policyId === 'unknown' && typeof (insuranceVault as InsuranceVaultContract).nextPolicyId === 'function') {
+                try {
+                    const nextId = await (insuranceVault as InsuranceVaultContract).nextPolicyId!();
+                    if (typeof nextId === 'bigint' && nextId > BigInt(0)) {
+                        policyId = (nextId - BigInt(1)).toString();
+                    }
+                } catch (error) {
+                    console.warn('ripextension: Unable to derive policy ID from nextPolicyId()', error);
+                }
+            }
+
             console.log('Policy purchased successfully! Policy ID:', policyId);
+
+            let storedPolicyOnChain: Awaited<ReturnType<InsuranceVaultContract['policies']>> | null = null;
+            if (/^[0-9]+$/.test(policyId)) {
+                try {
+                    storedPolicyOnChain = await insuranceVault.policies(BigInt(policyId));
+                } catch (error) {
+                    console.warn('ripextension: Failed to fetch on-chain policy details:', error);
+                }
+            }
 
             const userAddress = address;
 
@@ -691,7 +713,8 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                 policyId,
                 commitmentData,
                 invoiceDataForPolicy,
-                contractAddresses
+                contractAddresses,
+                storedPolicyOnChain ? Number(storedPolicyOnChain.policyPurchaseDate) : undefined
             );
 
             savePolicyForAddress(userAddress, policyData);
@@ -1030,28 +1053,28 @@ const InvoiceWidget: React.FC<InvoiceWidgetProps> = ({
                                         {claimState.eligibility && (
                                             <div className={styles.policyDetailSection}>
                                                 <h4 className={styles.policySectionTitle}>Claim Eligibility</h4>
-                                            <div className={styles.policyDetailGrid}>
-                                                <div className={styles.policyDetail}>
-                                                    <span className={styles.policyDetailLabel}>Current Price</span>
-                                                    <span className={styles.policyDetailValue}>{claimState.eligibility.formattedCurrent}</span>
+                                                <div className={styles.policyDetailGrid}>
+                                                    <div className={styles.policyDetail}>
+                                                        <span className={styles.policyDetailLabel}>Current Price</span>
+                                                        <span className={styles.policyDetailValue}>{claimState.eligibility.formattedCurrent}</span>
+                                                    </div>
+                                                    <div className={styles.policyDetail}>
+                                                        <span className={styles.policyDetailLabel}>Price Drop</span>
+                                                        <span className={styles.policyDetailValue}>{claimState.eligibility.formattedDrop}</span>
+                                                    </div>
+                                                    <div className={styles.policyDetail}>
+                                                        <span className={styles.policyDetailLabel}>Drop %</span>
+                                                        <span className={styles.policyDetailValue}>{claimState.eligibility.dropPercentage.toFixed(2)}%</span>
+                                                    </div>
+                                                    <div className={styles.policyDetail}>
+                                                        <span className={styles.policyDetailLabel}>Potential Payout</span>
+                                                        <span className={styles.policyDetailValue}>{formatUsdFromMicros(claimState.eligibility.payoutAmount)}</span>
+                                                    </div>
+                                                    <div className={styles.policyDetail}>
+                                                        <span className={styles.policyDetailLabel}>Checked</span>
+                                                        <span className={styles.policyDetailValue}>{new Date(claimState.eligibility.checkedAt).toLocaleString()}</span>
+                                                    </div>
                                                 </div>
-                                                <div className={styles.policyDetail}>
-                                                    <span className={styles.policyDetailLabel}>Price Drop</span>
-                                                    <span className={styles.policyDetailValue}>{claimState.eligibility.formattedDrop}</span>
-                                                </div>
-                                                <div className={styles.policyDetail}>
-                                                    <span className={styles.policyDetailLabel}>Drop %</span>
-                                                    <span className={styles.policyDetailValue}>{claimState.eligibility.dropPercentage.toFixed(2)}%</span>
-                                                </div>
-                                                <div className={styles.policyDetail}>
-                                                    <span className={styles.policyDetailLabel}>Potential Payout</span>
-                                                    <span className={styles.policyDetailValue}>{formatUsdFromMicros(claimState.eligibility.payoutAmount)}</span>
-                                                </div>
-                                                <div className={styles.policyDetail}>
-                                                    <span className={styles.policyDetailLabel}>Checked</span>
-                                                    <span className={styles.policyDetailValue}>{new Date(claimState.eligibility.checkedAt).toLocaleString()}</span>
-                                                </div>
-                                            </div>
                                                 {claimState.error && (
                                                     <p className={styles.policyError}>{claimState.error}</p>
                                                 )}
