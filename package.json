@@ -1,28 +1,37 @@
 {
-  "name": "ripapp",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "next": "15.5.4",
-    "@reown/appkit": "^1.8.4",
-    "@reown/appkit-adapter-ethers": "^1.8.4",
-    "@reown/appkit-adapter-wagmi": "^1.8.4"
-  },
-  "devDependencies": {
-    "typescript": "^5",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "15.5.4",
-    "@eslint/eslintrc": "^3"
-  }
+    "name": "rip-remorse-insurance-protocol",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "dev": "next dev -p 3002",
+        "build": "next build",
+        "start": "next start -p 3002",
+        "lint": "next lint"
+    },
+    "dependencies": {
+        "@reown/appkit": "^1.8.4",
+        "@reown/appkit-adapter-ethers": "^1.8.4",
+        "@reown/appkit-adapter-wagmi": "^1.8.4",
+        "@tanstack/react-query": "^5.87.4",
+        "circomlibjs": "^0.1.7",
+        "ethers": "6.15.0",
+        "jotai": "^2.10.7",
+        "next": "15.5.2",
+        "pdfjs-dist": "^4.8.69",
+        "react": "19.0.0",
+        "react-dom": "19.0.0",
+        "siwe": "^3.0.0",
+        "snarkjs": "^0.7.5",
+        "viem": "^2.37.5",
+        "wagmi": "^2.16.9",
+        "zustand": "^4.5.5"
+    },
+    "devDependencies": {
+        "@types/node": "^24.5.2",
+        "@types/react": "^19.1.13",
+        "@types/react-dom": "^19.1.9",
+        "eslint": "9.17.0",
+        "eslint-config-next": "15.5.2",
+        "typescript": "^5.9.2"
+    }
 }

@@ -20,7 +20,7 @@ const ClientHeaderWidget = dynamic(() => import('./HeaderWidget'), {
             }}>
                 <div>
                     <h1 style={{ margin: 0, fontSize: '1.8rem', fontWeight: 700, color: 'white' }}>
-                        🛡️ CryptoInsure
+                        🛡️ ripextension
                     </h1>
                     <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.9rem', opacity: 0.9, color: '#FF9900', fontWeight: 500 }}>
                         Decentralized Insurance Platform

@@ -1,7 +1,7 @@
 import Head from 'next/head';
 import styles from '../styles/Home.module.css';
 import HeaderWidgetClient from "@/components/HeaderWidgetClient";
-import InvoiceWidget from "@/components/InvoiceWidget";
+import InvoiceWidget from "@/components/widgets/InvoiceWidget";
 
 export default function Home(): React.JSX.Element {
 
